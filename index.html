@@ -335,12 +335,18 @@
   var MUTED = /[?&#]mute/.test(location.href);   // ?mute = 无声预览模式（自己测试用）
 
   /* ================= 音频引擎（全部 Web Audio 合成，无需音频文件） ================= */
-  var ctx = null, tensionNodes = [], scareNodes = [];
+  var ctx = null, outBus = null, tensionNodes = [], scareNodes = [];
 
   function ensureAudio(){
     if (MUTED) return null;
     if (!ctx) {
-      try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ return null; }
+      try {
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        outBus = ctx.createGain();   // 全局输出总线：加 ?vol=0.05 可小声试听
+        var v = parseFloat((location.search.match(/vol=([\d.]+)/) || [])[1]);
+        outBus.gain.value = isNaN(v) ? 1 : Math.max(0.0001, Math.min(1, v));
+        outBus.connect(ctx.destination);
+      } catch(e){ return null; }
     }
     if (ctx.state === 'suspended') { ctx.resume(); }
     return ctx;
@@ -366,7 +372,7 @@
   function startTension(totalSec){
     var c = ensureAudio(); if(!c) return;
     var t0 = c.currentTime;
-    var master = c.createGain(); master.gain.value = 0.9; master.connect(c.destination);
+      var master = c.createGain(); master.gain.value = 0.9; master.connect(outBus);
     tensionNodes.push(master);
 
     // 低频嗡鸣
@@ -428,7 +434,7 @@
     var makeup = c.createGain(); makeup.gain.value=1.35;
     var clip = c.createWaveShaper(); clip.curve = shaperCurve(1.6); clip.oversample='4x';
     var master = c.createGain(); master.gain.value=1;
-    master.connect(comp).connect(makeup).connect(clip).connect(c.destination);
+    master.connect(comp).connect(makeup).connect(clip).connect(outBus);
     scareNodes.push(master);
 
     function reg(o){ scareNodes.push(o); return o; }
@@ -438,50 +444,91 @@
     var cg = c.createGain(); env(cg, t, 1.0, 0.05);
     click.connect(cg).connect(master); click.start(t); reg(click);
 
-    // 2) 子低音重击
-    var sub = c.createOscillator(); sub.type='sine';
-    sub.frequency.setValueAtTime(60, t); sub.frequency.exponentialRampToValueAtTime(28, t+1.4);
-    var sg = c.createGain(); env(sg, t, 1.0, 1.7);
-    sub.connect(sg).connect(master); sub.start(t); sub.stop(t+1.8); reg(sub);
-    // 第二次闷击
-    var sub2 = c.createOscillator(); sub2.type='sine';
-    sub2.frequency.setValueAtTime(48, t+2.1); sub2.frequency.exponentialRampToValueAtTime(26, t+3.2);
-    var s2g = c.createGain(); env(s2g, t+2.1, 0.8, 1.3);
-    sub2.connect(s2g).connect(master); sub2.start(t+2.1); sub2.stop(t+3.5); reg(sub2);
+    // 2) 子低音重击（三连，贯穿全程）
+    [[0, 60, 28, 1.0, 1.7], [2.1, 48, 26, 0.8, 1.3], [4.3, 52, 26, 0.9, 1.6], [6.2, 44, 24, 1.0, 1.6]].forEach(function(s){
+      var st = t + s[0];
+      var o = c.createOscillator(); o.type='sine';
+      o.frequency.setValueAtTime(s[1], st);
+      o.frequency.exponentialRampToValueAtTime(s[2], st + s[4]*0.85);
+      var g = c.createGain(); env(g, st, s[3], s[4]);
+      o.connect(g).connect(master); o.start(st); o.stop(st + s[4] + 0.15); reg(o);
+    });
 
-    // 3) 嘶吼噪声（下扫 + 失真）
-    var ns = c.createBufferSource(); ns.buffer = noiseBuffer(c, 2.4);
+    // 3) 嘶吼噪声（长下扫 + 失真）+ 低频咆哮尾
+    var ns = c.createBufferSource(); ns.buffer = noiseBuffer(c, 3.8);
     var bp = c.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=0.9;
-    bp.frequency.setValueAtTime(3600, t); bp.frequency.exponentialRampToValueAtTime(420, t+1.9);
+    bp.frequency.setValueAtTime(3600, t); bp.frequency.exponentialRampToValueAtTime(420, t+3.2);
     var ws = c.createWaveShaper(); ws.curve = shaperCurve(24); ws.oversample='2x';
-    var ng = c.createGain(); env(ng, t, 0.72, 2.2);
+    var ng = c.createGain(); env(ng, t, 0.72, 3.6);
     ns.connect(bp).connect(ws).connect(ng).connect(master);
     ns.start(t); reg(ns);
 
-    // 4) 尖叫簇（不和谐锯齿波下坠）——立即 + 0.5s 回声
+    var growl = c.createBufferSource(); growl.buffer = noiseBuffer(c, 6.0);
+    var gb = c.createBiquadFilter(); gb.type='bandpass'; gb.Q.value=1.4; gb.frequency.value=170;
+    var gw = c.createWaveShaper(); gw.curve = shaperCurve(10); gw.oversample='2x';
+    var gg = c.createGain();
+    gg.gain.setValueAtTime(0.0001, t+2.2);
+    gg.gain.exponentialRampToValueAtTime(0.5, t+2.55);
+    gg.gain.exponentialRampToValueAtTime(0.0001, t+7.9);
+    var gl = c.createOscillator(); gl.frequency.value=6.5;      // 咆哮颤动
+    var glg = c.createGain(); glg.gain.value=0.16;
+    gl.connect(glg).connect(gg.gain);
+    growl.connect(gb).connect(gw).connect(gg).connect(master);
+    growl.start(t+2.2); growl.stop(t+8.05);
+    gl.start(t+2.2); gl.stop(t+8.05); reg(growl); reg(gl);
+
+    // 4) 尖叫簇（不和谐锯齿波下坠）——多轮回声拖长
     [620, 656, 881].forEach(function(f, i){
-      [0, 0.5].forEach(function(off, echo){
+      [[0, 0.34], [0.5, 0.22], [1.1, 0.15], [2.0, 0.12], [3.0, 0.10], [4.2, 0.08]].forEach(function(e){
+        var tt = t + e[0];
         var o = c.createOscillator(); o.type='sawtooth';
-        var tt = t+off;
         o.frequency.setValueAtTime(f, tt);
-        o.frequency.exponentialRampToValueAtTime(f*0.4, tt+1.9);
-        var g = c.createGain(); env(g, tt, (echo?0.13:0.34) - i*0.03, 2.1);
-        o.connect(g).connect(master); o.start(tt); o.stop(tt+2.2); reg(o);
+        o.frequency.exponentialRampToValueAtTime(f*0.4, tt+2.4);
+        var g = c.createGain(); env(g, tt, Math.max(0.05, e[1] - i*0.03), 2.6);
+        o.connect(g).connect(master); o.start(tt); o.stop(tt+2.7); reg(o);
       });
     });
+    // 长坠哀嚎：一对不和谐锯齿缓缓下滑 4 秒
+    [880, 915].forEach(function(f){
+      var o = c.createOscillator(); o.type='sawtooth';
+      var st = t + 0.8;
+      o.frequency.setValueAtTime(f, st);
+      o.frequency.exponentialRampToValueAtTime(160, st+6.8);
+      var g = c.createGain(); env(g, st, 0.17, 7.0);
+      o.connect(g).connect(master); o.start(st); o.stop(st+7.2); reg(o);
+    });
 
-    // 5) 高频刺鸣（颤音方波）
-    var sq = c.createOscillator(); sq.type='square';
-    sq.frequency.setValueAtTime(2600, t); sq.frequency.exponentialRampToValueAtTime(1500, t+1.5);
-    var sqg = c.createGain(); sqg.gain.value=0;
-    var lfo = c.createOscillator(); lfo.frequency.value=28;
-    var lg = c.createGain(); lg.gain.value=0.09;
-    lfo.connect(lg).connect(sqg.gain);
-    sqg.gain.setValueAtTime(0.09, t);
-    sqg.gain.exponentialRampToValueAtTime(0.0001, t+1.5);
-    sq.connect(sqg).connect(master);
-    sq.start(t); sq.stop(t+1.6); lfo.start(t); lfo.stop(t+1.6);
-    reg(sq); reg(lfo);
+    // 5) 高频刺鸣（颤音方波）×2
+    [[0, 2600, 1500, 1.5, 0.09], [3.0, 2900, 1900, 1.8, 0.07], [5.4, 2400, 1700, 1.6, 0.06]].forEach(function(s){
+      var st = t + s[0];
+      var sq = c.createOscillator(); sq.type='square';
+      sq.frequency.setValueAtTime(s[1], st);
+      sq.frequency.exponentialRampToValueAtTime(s[2], st+s[3]);
+      var sqg = c.createGain(); sqg.gain.value=0;
+      var lfo = c.createOscillator(); lfo.frequency.value=28;
+      var lg = c.createGain(); lg.gain.value=s[4];
+      lfo.connect(lg).connect(sqg.gain);
+      sqg.gain.setValueAtTime(s[4], st);
+      sqg.gain.exponentialRampToValueAtTime(0.0001, st+s[3]);
+      sq.connect(sqg).connect(master);
+      sq.start(st); sq.stop(st+s[3]+0.1); lfo.start(st); lfo.stop(st+s[3]+0.1);
+      reg(sq); reg(lfo);
+    });
+
+    // 6) 尾音低鸣：不和谐低频持续到结束，收尾不发空
+    var droneGain = c.createGain();
+    droneGain.gain.setValueAtTime(0.0001, t+3.0);
+    droneGain.gain.exponentialRampToValueAtTime(0.14, t+3.4);
+    droneGain.gain.exponentialRampToValueAtTime(0.0001, t+7.9);
+    droneGain.connect(master);
+    [62, 66, 99].forEach(function(f, i){
+      var o = c.createOscillator(); o.type = i===2 ? 'sawtooth' : 'sine';
+      o.frequency.value = f;
+      var og = c.createGain(); og.gain.value = i===2 ? 0.35 : 1;
+      o.connect(og).connect(droneGain);
+      o.start(t+3.0); o.stop(t+8.0); reg(o);
+    });
+    reg(droneGain);
   }
   function stopScareAudio(){
     scareNodes.forEach(function(n){
@@ -494,7 +541,7 @@
   function chime(){
     var c = ensureAudio(); if(!c) return;
     var t = c.currentTime;
-    var g = c.createGain(); g.gain.value=0.16; g.connect(c.destination);
+    var g = c.createGain(); g.gain.value=0.16; g.connect(outBus);
     [523.25, 659.25, 783.99, 1046.5].forEach(function(f, i){
       var o = c.createOscillator(); o.type='triangle'; o.frequency.value=f;
       var eg = c.createGain(); env(eg, t+i*0.09, 0.5, 0.5);
@@ -523,7 +570,7 @@
     } catch(e){}
 
     hide($('#landing')); show($('#loading'));
-    if (!MUTED) { try { startTension(4.75); } catch(e){} }
+    if (!MUTED) { try { startTension(4.75); } catch(e){ (window.__audioErr=window.__audioErr||[]).push('tension:'+((e&&e.message)||e)); } }
 
     var steps = [
       [0,    '正在连接命运服务器……', 8],
@@ -549,8 +596,8 @@
     $('#scare').classList.add('on');
     $('#blackout').classList.remove('on');
 
-    if (!MUTED) { try { stopTension(true); scareSting(); } catch(e){} }
-    if (navigator.vibrate) { try{ navigator.vibrate([120,60,900,60,1400]); }catch(e){} }
+    if (!MUTED) { try { stopTension(true); scareSting(); } catch(e){ (window.__audioErr=window.__audioErr||[]).push('sting:'+((e&&e.message)||e)); } }
+    if (navigator.vibrate) { try{ navigator.vibrate([120,60,900,60,1400,80,900,80,1200,80,1000,80,1400]); }catch(e){} }
     startShake();
 
     scareNameEl.textContent = name + '！！别回头！';
@@ -561,6 +608,14 @@
     later(function(){ $('#faceWrap').classList.remove('mirror'); }, 2350);
     later(function(){ $('#faceWrap').classList.add('mirror'); }, 2800);
     later(function(){ $('#faceWrap').classList.remove('mirror'); }, 3050);
+    later(function(){ $('#faceWrap').classList.add('mirror'); }, 3900);
+    later(function(){ $('#faceWrap').classList.remove('mirror'); }, 4350);
+    later(function(){ $('#faceWrap').classList.add('mirror'); }, 4900);
+    later(function(){ $('#faceWrap').classList.remove('mirror'); }, 5350);
+    later(function(){ $('#faceWrap').classList.add('mirror'); }, 6000);
+    later(function(){ $('#faceWrap').classList.remove('mirror'); }, 6450);
+    later(function(){ $('#faceWrap').classList.add('mirror'); }, 7100);
+    later(function(){ $('#faceWrap').classList.remove('mirror'); }, 7500);
 
     // 标题栏闪动
     var flip = false;
@@ -568,7 +623,7 @@
       document.title = (flip = !flip) ? '😱😱😱😱😱' : '啊啊啊啊啊啊！';
     }, 350);
 
-    later(endScare, 4300);
+    later(endScare, 8000);
   }
 
   function startShake(){
@@ -603,7 +658,7 @@
     $('#revealTitle').textContent = '恭喜 ' + name + '，你被整蛊啦！';
     $('#revealJoke').textContent = '别慌，什么都没有从屏幕里爬出来 —— 这只是一场恶作剧。深呼吸，擦擦冷汗，然后把这份惊吓原封不动地传给你的朋友吧 😈';
     show($('#reveal'));
-    if (!MUTED) { try { chime(); } catch(e){} }
+    if (!MUTED) { try { chime(); } catch(e){ (window.__audioErr=window.__audioErr||[]).push('chime:'+((e&&e.message)||e)); } }
     countUp($('#bpmNum'), 178, 900);
     countUp($('#dbNum'), 92, 900);
   }
