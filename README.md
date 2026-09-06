@@ -2,7 +2,10 @@
 
 输入名字，3 秒揭晓只有你能看到的专属运势。AI × 东方玄学，准确率高达 99.8%（bushi）。
 
-**在线体验：https://november-is-your-birthday.github.io/fortune-test-2026/**
+**在线体验**
+
+- 国内优选：https://fortune-test-2026.pages.dev/
+- 国际线路：https://november-is-your-birthday.github.io/fortune-test-2026/
 
 ## 特性
 
